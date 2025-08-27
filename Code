@@ -1,0 +1,235 @@
+const mineflayer = require('mineflayer');
+const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
+
+// Global kuyruk (bot yeniden bağlandığında korunur)
+let kitQueue = [];
+let isProcessing = false;
+
+// Bot'u let ile tanımla (yeniden atama için)
+let bot;
+
+// TPA gecikmesi (her oyuncudan sonra 25 saniye bekleme)
+const PLAYER_DELAY = 25000; // 25 saniye
+
+// Rastgele mesajlar (burayı kendi kelimelerinle değiştir, örneğin ['Mesaj1', 'Mesaj2'])
+const RANDOM_MESSAGES = [
+  '%kit yazarak rastgele kit alabilirsin!',
+  'SelimBot kit dağıtıyor! %kit yazın.',
+  'Aktifim, kit için %kit!',
+  
+];
+
+// Rastgele mesaj intervali (1.5 dk = 90 saniye)
+const RANDOM_CHAT_INTERVAL = 90000;
+
+// Bot oluşturma ve başlatma fonksiyonu
+function createBot() {
+  bot = mineflayer.createBot({
+    host: 'deneme.com', // Sunucu IP'si
+    port: 25565,          // Sunucu portu
+    username: 'deneme' // Botun kullanıcı adı
+  });
+
+  // Plugin yükle
+  bot.loadPlugin(pathfinder);
+
+  // Event listener'ları ata
+  bot.on('spawn', () => {
+    console.log('Bot sunucuya bağlandı veya yeniden doğdu!');
+    const mcData = require('minecraft-data')(bot.version);
+    const defaultMove = new Movements(bot, mcData);
+    // Movements ayarlarını güçlendir (engelleri aşmak için)
+    defaultMove.canDig = true; // Blok kazma etkin
+    defaultMove.scafoldingBlocks = []; // Köprü kurma için bloklar (boş bırak, otomatik)
+    defaultMove.allowParkour = true; // Zıplama ve parkur etkin
+    defaultMove.allowSprinting = true; // Koşma etkin
+    bot.pathfinder.setMovements(defaultMove);
+    processQueue(); // Kuyruğu işlemeye başla
+
+    // Yeni: Her 90 saniyede bir rastgele mesaj at
+    setInterval(() => {
+      const randomIndex = Math.floor(Math.random() * RANDOM_MESSAGES.length);
+      const randomMessage = RANDOM_MESSAGES[randomIndex];
+      bot.chat(randomMessage);
+      console.log(`Rastgele mesaj atıldı: ${randomMessage}`);
+    }, RANDOM_CHAT_INTERVAL);
+  });
+
+  // Chat event (güncellendi: %kit içeren mesajları algıla, chat modifier'lar için)
+  bot.on('chat', (username, message) => {
+    // Mesajı küçük harfe çevir ve trim'le (boşlukları temizle)
+    const cleanedMessage = message.trim().toLowerCase();
+    
+    // Eğer mesaj '%kit' içeriyorsa ve bot kendisi değilse
+    if (cleanedMessage.includes('%kit') && username !== bot.username) {
+      console.log(`${username} kit istedi (mesaj: "${message}"), kuyruğa eklendi!`);
+      
+      // 4 saniye sonra mesaj gönder
+      setTimeout(() => {
+        bot.chat(`/msg ${username} tmm rastgele kit geliyo`);
+      }, 4000);
+
+      // Oyuncuyu kuyruğa ekle
+      if (!kitQueue.includes(username)) {
+        kitQueue.push(username);
+        processQueue(); // Kuyruğu işle
+      } else {
+        bot.chat(`/msg ${username} zaten kuyruktasın, sıranı bekle!`);
+      }
+    }
+  });
+
+  // End event (yeniden bağlanma)
+  bot.on('end', () => {
+    console.log('Bot bağlantısı koptu, yeniden bağlanıyor...');
+    setTimeout(createBot, 5000); // Yeniden oluştur (recursive)
+  });
+}
+
+// İlk bot'u oluştur
+createBot();
+
+// Paylaşılacak örnek kod (değişmedi)
+const customCode = `
+Merhaba! İşte kit botu kodu örneği:
+1. Sandıktan shulker al
+2. Oyuncuya teleport ol
+3. Shulker'ı at
+4. /kill yap
+Detaylı bilgi için: https://example.com
+`;
+
+// TPA kabul edildiğini kontrol eden fonksiyon (timeout tamamen kaldırıldı, sonsuz bekler)
+function waitForTeleport(bot, targetPlayer) {
+  return new Promise((resolve) => { // Reject yok, sonsuz bekler
+    const initialPosition = bot.entity.position.clone();
+    const checkInterval = 500; // Her 500ms'de pozisyonu kontrol et
+
+    const interval = setInterval(() => {
+      const currentPosition = bot.entity.position;
+
+      try {
+        // Oyuncunun konumuna yakın mı diye kontrol et (null kontrolleri)
+        if (targetPlayer && bot.players[targetPlayer] && bot.players[targetPlayer].entity) {
+          const playerPos = bot.players[targetPlayer].entity.position;
+          if (!playerPos) {
+            console.log(`PlayerPos null: Oyuncu ${targetPlayer} pozisyonu yüklenmedi.`);
+            return;
+          }
+          const distance = currentPosition.distanceTo(playerPos);
+
+          if (distance < 5 && !currentPosition.equals(initialPosition)) {
+            clearInterval(interval);
+            resolve(true); // TPA başarılı
+          }
+        } else {
+          console.log(`Entity null (interval): Oyuncu ${targetPlayer} entity yüklenmedi, beklemeye devam...`);
+        }
+      } catch (err) {
+        console.error(`Interval hata: ${targetPlayer} için pozisyon kontrolü başarısız`, err);
+      }
+    }, checkInterval);
+
+    // Botun pozisyon değişikliğini dinle
+    const moveHandler = () => {
+      const currentPosition = bot.entity.position;
+
+      try {
+        if (targetPlayer && bot.players[targetPlayer] && bot.players[targetPlayer].entity) {
+          const playerPos = bot.players[targetPlayer].entity.position;
+          if (!playerPos) {
+            console.log(`PlayerPos null (move): Oyuncu ${targetPlayer} pozisyonu yüklenmedi.`);
+            return;
+          }
+          const distance = currentPosition.distanceTo(playerPos);
+
+          if (distance < 5 && !currentPosition.equals(initialPosition)) {
+            clearInterval(interval);
+            bot.removeListener('move', moveHandler); // Handler'ı kaldır
+            resolve(true); // TPA başarılı
+          }
+        } else {
+          console.log(`Entity null (move): Oyuncu ${targetPlayer} entity null, atlanıyor.`);
+        }
+      } catch (err) {
+        console.error(`Move hata: ${targetPlayer} için pozisyon kontrolü başarısız`, err);
+      }
+    };
+
+    bot.on('move', moveHandler);
+  });
+}
+
+// Kit dağıtım işlemi (waitForTeleport çağrısı güncellendi, timeout parametresi kaldırıldı)
+async function distributeKit(targetPlayer) {
+  try {
+    console.log(`${targetPlayer} için kit dağıtımı başladı!`);
+
+    // Sandığa git (timeout ekle: 60 saniye)     Sandığın Yerini  ayarlama yeri örnek
+    await bot.pathfinder.goto(new goals.GoalNear(-123, 50, 123, 10), { timeout: 60000 });
+
+    const chest = bot.findBlock({
+      matching: bot.registry.blocksByName.chest.id,
+      maxDistance: 5,
+      point: bot.entity.position
+    });
+
+    if (!chest) {
+      bot.chat('Yakında sandık bulunamadı!');
+      return;
+    }
+
+    const container = await bot.openContainer(chest);
+    const shulker = container.containerItems().find(item => item.name.includes('shulker_box'));
+
+    if (!shulker) {
+      bot.chat('Sandıkta shulker kutusu bulunamadı!');
+      await container.close();
+      return;
+    }
+
+    await container.withdraw(shulker.type, null, 1);
+    await container.close();
+
+    if (targetPlayer && bot.players[targetPlayer]) {
+      bot.chat(`/tpa ${targetPlayer}`);
+      console.log(`${targetPlayer} oyuncusuna TPA isteği gönderildi, bekleniyor...`);
+
+      // TPA'nın kabul edilmesini bekle (timeout kaldırıldı, sonsuz bekler)
+      await waitForTeleport(bot, targetPlayer);
+      console.log('TPA kabul edildi, shulker atılıyor...');
+
+      const item = bot.inventory.items().find(item => item.name.includes('shulker_box'));
+      if (item) {
+        await bot.toss(item.type, null, 1);
+        bot.chat('/kill');
+      } else {
+        bot.chat('Envanterde shulker kutusu yok!');
+      }
+    } else {
+      bot.chat(`${targetPlayer} bulunamadı!`);
+    }
+  } catch (err) {
+    console.error('Kit dağıtım hatası:', err);
+    bot.chat(err.message || 'Kit dağıtımı başarısız! Yol bulma hatası.');
+    // Hata olursa kuyruğu devam ettir (isProcessing false yap)
+    isProcessing = false;
+    processQueue();
+  }
+}
+
+// Kuyruğu işleme fonksiyonu (güncellendi: her oyuncudan sonra 25 sn bekle)
+async function processQueue() {
+  if (isProcessing || kitQueue.length === 0) return;
+
+  isProcessing = true;
+  const targetPlayer = kitQueue.shift(); // Kuyruktan ilk oyuncuyu al
+  await distributeKit(targetPlayer);
+  isProcessing = false;
+
+  // Her oyuncudan sonra 25 saniye bekle, sonra sıradaki oyuncuya geç
+  console.log('Bir oyuncu tamamlandı, 25 saniye bekleniyor...');
+  setTimeout(() => {
+    processQueue(); // Sonraki oyuncuya geç
+  }, PLAYER_DELAY);
+}
