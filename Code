@@ -1,26 +1,32 @@
 const mineflayer = require('mineflayer');
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
 
-// Global kuyruk (bot yeniden bağlandığında korunur)
+// Global kuyruk ve cooldown (bot yeniden bağlandığında korunur)
 let kitQueue = [];
 let isProcessing = false;
-
-// Bot'u let ile tanımla (yeniden atama için)
-let bot;
+let lastKitTime = {}; // Yeni: Oyuncu cooldown'ları (username: timestamp)
 
 // TPA gecikmesi (her oyuncudan sonra 25 saniye bekleme)
 const PLAYER_DELAY = 25000; // 25 saniye
+
+// Oyuncu cooldown süresi (10 dakika = 600000 ms)
+const COOLDOWN_TIME = 600000; // 10 dakika
+
+// Her 10 dakikada bir shulker alma intervali (600000 ms)
+const SHULKER_INTERVAL = 600000; // 10 dakika
 
 // Rastgele mesajlar (burayı kendi kelimelerinle değiştir, örneğin ['Mesaj1', 'Mesaj2'])
 const RANDOM_MESSAGES = [
   '%kit yazarak rastgele kit alabilirsin!',
   'SelimBot kit dağıtıyor! %kit yazın.',
   'Aktifim, kit için %kit!',
-  
 ];
 
 // Rastgele mesaj intervali (1.5 dk = 90 saniye)
 const RANDOM_CHAT_INTERVAL = 90000;
+
+// Bot'u let ile tanımla (yeniden atama için)
+let bot;
 
 // Bot oluşturma ve başlatma fonksiyonu
 function createBot() {
@@ -53,15 +59,34 @@ function createBot() {
       bot.chat(randomMessage);
       console.log(`Rastgele mesaj atıldı: ${randomMessage}`);
     }, RANDOM_CHAT_INTERVAL);
+
+    // Yeni: Her 10 dakikada bir shulker al (envanterde yoksa)
+    setInterval(async () => {
+      await fetchShulker(); // Shulker alma fonksiyonu
+    }, SHULKER_INTERVAL);
+
+    // Spawn'da hemen bir shulker al (ilk sefer)
+    fetchShulker();
   });
 
-  // Chat event (güncellendi: %kit içeren mesajları algıla, chat modifier'lar için)
+  // Chat event (güncellendi: %kit içeren mesajları algıla, cooldown kontrolü ekle)
   bot.on('chat', (username, message) => {
     // Mesajı küçük harfe çevir ve trim'le (boşlukları temizle)
     const cleanedMessage = message.trim().toLowerCase();
     
     // Eğer mesaj '%kit' içeriyorsa ve bot kendisi değilse
     if (cleanedMessage.includes('%kit') && username !== bot.username) {
+      const now = Date.now();
+      const lastTime = lastKitTime[username] || 0;
+
+      // Cooldown kontrolü: 10 dakika dolmadıysa görmezden gel
+      if (now - lastTime < COOLDOWN_TIME) {
+        console.log(`${username} cooldown'da (kalan: ${Math.ceil((COOLDOWN_TIME - (now - lastTime)) / 1000)} sn), dikkate alınmadı!`);
+        // Opsiyonel: Oyuncuya mesaj at (istiyorsan kaldır)
+        bot.chat(`/msg ${username} 10 dakika bekle, cooldown'dasın!`);
+        return; // Dikkate alma, devam et
+      }
+
       console.log(`${username} kit istedi (mesaj: "${message}"), kuyruğa eklendi!`);
       
       // 4 saniye sonra mesaj gönder
@@ -69,7 +94,7 @@ function createBot() {
         bot.chat(`/msg ${username} tmm rastgele kit geliyo`);
       }, 4000);
 
-      // Oyuncuyu kuyruğa ekle
+      // Oyuncuyu kuyruğa ekle (eğer zaten yoksa)
       if (!kitQueue.includes(username)) {
         kitQueue.push(username);
         processQueue(); // Kuyruğu işle
@@ -160,12 +185,55 @@ function waitForTeleport(bot, targetPlayer) {
   });
 }
 
-// Kit dağıtım işlemi (waitForTeleport çağrısı güncellendi, timeout parametresi kaldırıldı)
+// Yeni: Her 10 dakikada bir shulker alma fonksiyonu
+async function fetchShulker() {
+  try {
+    // Eğer envanterde zaten shulker varsa, alma
+    const item = bot.inventory.items().find(item => item.name.includes('shulker_box'));
+    if (item) {
+      console.log('Envanterde zaten shulker var, alma atlandı.');
+      return;
+    }
+
+    console.log('Her 10 dakikada bir shulker alma başladı!');
+
+    // Sandığa git (örnek koordinatlar, değiştir)
+    await bot.pathfinder.goto(new goals.GoalNear(-123, 50, 123, 10), { timeout: 60000 });
+
+    const chest = bot.findBlock({
+      matching: bot.registry.blocksByName.chest.id,
+      maxDistance: 5,
+      point: bot.entity.position
+    });
+
+    if (!chest) {
+      console.log('Yakında sandık bulunamadı!');
+      return;
+    }
+
+    const container = await bot.openContainer(chest);
+    const shulker = container.containerItems().find(item => item.name.includes('shulker_box'));
+
+    if (!shulker) {
+      console.log('Sandıkta shulker kutusu bulunamadı!');
+      await container.close();
+      return;
+    }
+
+    await container.withdraw(shulker.type, null, 1);
+    await container.close();
+    console.log('Shulker alındı!');
+  } catch (err) {
+    console.error('Shulker alma hatası:', err);
+  }
+}
+
+// Kit dağıtım işlemi (cooldown güncellemesi eklendi)
 async function distributeKit(targetPlayer) {
   try {
     console.log(`${targetPlayer} için kit dağıtımı başladı!`);
 
-    // Sandığa git (timeout ekle: 60 saniye)     Sandığın Yerini  ayarlama yeri örnek
+    // Sandığa git (timeout ekle: 60 saniye) // Sandığın Yerini ayarlama yeri örnek
     await bot.pathfinder.goto(new goals.GoalNear(-123, 50, 123, 10), { timeout: 60000 });
 
     const chest = bot.findBlock({
@@ -203,6 +271,10 @@ async function distributeKit(targetPlayer) {
       if (item) {
         await bot.toss(item.type, null, 1);
         bot.chat('/kill');
+
+        // Yeni: Kit dağıtımı tamamlandı, cooldown'u güncelle
+        lastKitTime[targetPlayer] = Date.now();
+        console.log(`${targetPlayer} için cooldown başladı (10 dakika).`);
       } else {
         bot.chat('Envanterde shulker kutusu yok!');
       }
